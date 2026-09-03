@@ -2,6 +2,7 @@ export interface ReceiveInboxProps {
   messageId: string;
   consumerName: string;
   payloadHash: string;
+  receivedAt?: Date;
 }
 
 export interface InboxMessageState {
@@ -26,7 +27,7 @@ export class InboxMessage {
       props.messageId,
       props.consumerName,
       props.payloadHash,
-      new Date(),
+      props.receivedAt || new Date(),
     );
   }
 

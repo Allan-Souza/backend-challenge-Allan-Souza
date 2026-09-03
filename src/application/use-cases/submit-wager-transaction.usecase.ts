@@ -8,7 +8,7 @@ import { Wallet } from '../../domain/wallet.js';
 import { Money } from '../../domain/money.js';
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus, FailureCode, LedgerDirection } from '../../domain/wager-transaction.js';
 import { WalletLedgerEntry } from '../../domain/wallet-ledger-entry.js';
-import { OutboxMessage } from '../../domain/messaging.js';
+import { OutboxMessage, InboxMessage } from '../../domain/messaging.js';
 import { v7 as uuidv7 } from 'uuid';
 
 export interface SubmitWagerTransactionCommand {
@@ -22,6 +22,12 @@ export interface SubmitWagerTransactionCommand {
   kind: WagerTransactionKind;
   moneyAmount: string;
   referenceExternalTransactionId?: string;
+  inbox?: {
+    messageId: string;
+    consumerName: string;
+    payloadHash: string;
+    receivedAt: Date;
+  };
 }
 
 @Injectable()
@@ -47,7 +53,15 @@ export class SubmitWagerTransactionUseCase {
         return existingTx; // Return idempotently
       }
 
-      // 2. Fetch Wallet with Optimistic Locking
+      // 2. Process Inbox if provided (idempotency via InboxMessage)
+      if (command.inbox) {
+        const existingInbox = await this.messagingRepo.findInboxMessage(command.inbox.consumerName, command.inbox.messageId);
+        if (existingInbox) {
+           throw new Error('InboxMessage collision: message already processed');
+        }
+      }
+
+      // 3. Fetch Wallet with Optimistic Locking
       const wallet = await this.walletRepo.findByPlayerAndCurrency(command.playerId, command.currency.toUpperCase());
       if (!wallet) {
         throw new Error(`Wallet not found for player ${command.playerId} and currency ${command.currency}`);
@@ -147,6 +161,17 @@ export class SubmitWagerTransactionUseCase {
         }
       });
       await this.messagingRepo.saveOutboxMessage(outboxEvent);
+
+      if (command.inbox) {
+        const inboxMsg = InboxMessage.receive({
+          messageId: command.inbox.messageId,
+          consumerName: command.inbox.consumerName,
+          payloadHash: command.inbox.payloadHash,
+          receivedAt: command.inbox.receivedAt,
+        });
+        inboxMsg.markProcessed(new Date());
+        await this.messagingRepo.saveInboxMessage(inboxMsg);
+      }
 
       return transaction;
     });

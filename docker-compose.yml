@@ -16,19 +16,12 @@ services:
       timeout: 5s
       retries: 5
 
-  localstack:
-    image: localstack/localstack:latest
+  sqs:
+    image: softwaremill/elasticmq-native:latest
     ports:
-      - "4566:4566"            # LocalStack Gateway
-      - "4510-4559:4510-4559"  # external services port range
-    environment:
-      - SERVICES=sqs
-      - DEBUG=1
-      - DOCKER_HOST=unix:///var/run/docker.sock
-      - AWS_DEFAULT_REGION=us-east-1
+      - "4566:9324"            # SQS Gateway (mapping 4566 to match localstack config)
     volumes:
-      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
-      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./elasticmq.conf:/opt/elasticmq.conf"
 
 volumes:
   pgdata:

@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
-import { LocalstackContainer, StartedLocalstackContainer } from '@testcontainers/localstack';
+import { LocalstackContainer, StartedLocalStackContainer } from '@testcontainers/localstack';
 import { MikroORM } from '@mikro-orm/core';
 import { SQSClient, CreateQueueCommand } from '@aws-sdk/client-sqs';
 import { AppModule } from '../src/app.module.js';

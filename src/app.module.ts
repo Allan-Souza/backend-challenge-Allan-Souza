@@ -26,11 +26,13 @@ import { WalletController } from './presentation/http/wallet.controller.js';
 import { TransactionController } from './presentation/http/transaction.controller.js';
 import { ReconciliationController } from './presentation/http/reconciliation.controller.js';
 import { HealthController } from './presentation/http/health.controller.js';
+import { MessagingModule } from './infrastructure/messaging/messaging.module.js';
 import { SqsConsumer } from './presentation/messaging/sqs.consumer.js';
 
 @Module({
   imports: [
     MikroOrmModule.forRoot(mikroOrmConfig),
+    MessagingModule,
     ScheduleModule.forRoot(),
     TerminusModule,
     LoggerModule.forRoot({
