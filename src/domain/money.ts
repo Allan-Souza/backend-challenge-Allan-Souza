@@ -12,6 +12,9 @@ export class Money {
   ) {}
 
   static from(props: MoneyProps): Money {
+    if (!props.currency || props.currency.trim() === '') {
+      throw new Error('Currency cannot be empty');
+    }
     if (!props.amount || props.amount.trim() === '') {
       throw new Error('Amount cannot be empty');
     }

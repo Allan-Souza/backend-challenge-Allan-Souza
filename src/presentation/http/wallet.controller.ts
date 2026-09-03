@@ -1,5 +1,6 @@
-import { Controller, Post, Body, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Body, HttpCode, HttpStatus, Get, Param, NotFoundException } from '@nestjs/common';
 import { CreateWalletUseCase } from '../../application/use-cases/create-wallet.usecase.js';
+import { WalletRepository } from '../../infrastructure/database/repositories/wallet.repository.js';
 
 class CreateWalletDto {
   playerId!: string;
@@ -9,7 +10,10 @@ class CreateWalletDto {
 
 @Controller('wallets')
 export class WalletController {
-  constructor(private readonly createWalletUseCase: CreateWalletUseCase) {}
+  constructor(
+    private readonly createWalletUseCase: CreateWalletUseCase,
+    private readonly walletRepo: WalletRepository,
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
@@ -20,6 +24,22 @@ export class WalletController {
       currency: dto.currency,
     });
     
+    return {
+      walletId: wallet.id,
+      playerId: wallet.playerId,
+      currency: wallet.currency,
+      balance: wallet.balance.toJSON().amount,
+    };
+  }
+
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  async getWallet(@Param('id') id: string) {
+    const wallet = await this.walletRepo.findById(id);
+    if (!wallet) {
+      throw new NotFoundException(`Wallet not found`);
+    }
+
     return {
       walletId: wallet.id,
       playerId: wallet.playerId,

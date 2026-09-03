@@ -12,6 +12,9 @@ import { WagerTransactionRepository } from './infrastructure/database/repositori
 import { WalletLedgerRepository } from './infrastructure/database/repositories/wallet-ledger.repository.js';
 import { MessagingRepository } from './infrastructure/database/repositories/messaging.repository.js';
 
+import { LoggerModule } from 'nestjs-pino';
+import { TerminusModule } from '@nestjs/terminus';
+
 // Application
 import { CreateWalletUseCase } from './application/use-cases/create-wallet.usecase.js';
 import { SubmitWagerTransactionUseCase } from './application/use-cases/submit-wager-transaction.usecase.js';
@@ -22,14 +25,30 @@ import { PendingReferenceWorker } from './application/workers/pending-reference.
 import { WalletController } from './presentation/http/wallet.controller.js';
 import { TransactionController } from './presentation/http/transaction.controller.js';
 import { ReconciliationController } from './presentation/http/reconciliation.controller.js';
+import { HealthController } from './presentation/http/health.controller.js';
 import { SqsConsumer } from './presentation/messaging/sqs.consumer.js';
 
 @Module({
   imports: [
     MikroOrmModule.forRoot(mikroOrmConfig),
     ScheduleModule.forRoot(),
+    TerminusModule,
+    LoggerModule.forRoot({
+      pinoHttp: {
+        transport: process.env.NODE_ENV !== 'production' ? { target: 'pino-pretty' } : undefined,
+        autoLogging: false,
+        serializers: {
+          req: (req) => ({
+            id: req.id,
+            method: req.method,
+            url: req.url,
+            correlationId: req.headers['x-correlation-id'],
+          }),
+        },
+      },
+    }),
   ],
-  controllers: [AppController, WalletController, TransactionController, ReconciliationController],
+  controllers: [AppController, WalletController, TransactionController, ReconciliationController, HealthController],
   providers: [
     AppService,
     WalletRepository,
