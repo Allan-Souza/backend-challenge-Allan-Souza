@@ -1,5 +1,6 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand, ChangeMessageVisibilityCommand } from '@aws-sdk/client-sqs';
+import { MikroORM, RequestContext } from '@mikro-orm/core';
 import { SubmitWagerTransactionUseCase } from '../../application/use-cases/submit-wager-transaction.usecase.js';
 import { WagerTransactionKind } from '../../domain/wager-transaction.js';
 
@@ -13,6 +14,7 @@ export class InboxWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly consumerName = 'inbox-worker-1';
 
   constructor(
+    private readonly orm: MikroORM,
     private readonly sqsClient: SQSClient,
     private readonly submitTransactionUseCase: SubmitWagerTransactionUseCase,
   ) {}
@@ -68,50 +70,51 @@ export class InboxWorkerService implements OnModuleInit, OnModuleDestroy {
 
     this.activeMessages++;
     try {
-      const payload = JSON.parse(message.Body);
-      const receiveCount = parseInt(message.Attributes?.ApproximateReceiveCount || '1', 10);
-      
-      this.logger.log({
-        msg: 'Processing SQS message',
-        messageId: message.MessageId,
-        receiveCount,
-        type: payload.type,
-      });
-
-      // Distinguish error types per README section 10:
-      // - Business errors (terminal) → ack
-      // - Transient errors → retry with backoff (don't ack)
-      // - Permanent errors → DLQ (don't ack, let maxReceiveCount handle it)
-      await this.submitTransactionUseCase.execute({
-        providerId: payload.data.providerId,
-        externalTransactionId: payload.data.externalTransactionId,
-        payloadHash: payload.data.idempotencyKey,
-        playerId: payload.data.playerId,
-        currency: payload.data.money.currency,
-        roundId: payload.data.roundId,
-        gameId: payload.data.gameId,
-        kind: payload.data.kind as WagerTransactionKind,
-        moneyAmount: payload.data.money.amount,
-        referenceExternalTransactionId: payload.data.referenceExternalTransactionId,
-        inbox: {
+      await RequestContext.create(this.orm.em, async () => {
+        const payload = JSON.parse(message.Body);
+        const receiveCount = parseInt(message.Attributes?.ApproximateReceiveCount || '1', 10);
+        
+        this.logger.log({
+          msg: 'Processing SQS message',
           messageId: message.MessageId,
-          consumerName: this.consumerName,
+          receiveCount,
+          type: payload.type,
+        });
+
+        // Distinguish error types per README section 10:
+        // - Business errors (terminal) → ack
+        // - Transient errors → retry with backoff (don't ack)
+        // - Permanent errors → DLQ (don't ack, let maxReceiveCount handle it)
+        await this.submitTransactionUseCase.execute({
+          providerId: payload.data.providerId,
+          externalTransactionId: payload.data.externalTransactionId,
           payloadHash: payload.data.idempotencyKey,
-          receivedAt: new Date(payload.occurredAt || new Date().toISOString()),
-        },
+          playerId: payload.data.playerId,
+          currency: payload.data.money.currency,
+          roundId: payload.data.roundId,
+          gameId: payload.data.gameId,
+          kind: payload.data.kind as WagerTransactionKind,
+          moneyAmount: payload.data.money.amount,
+          referenceExternalTransactionId: payload.data.referenceExternalTransactionId,
+          inbox: {
+            messageId: message.MessageId,
+            consumerName: this.consumerName,
+            payloadHash: payload.data.idempotencyKey,
+            receivedAt: new Date(payload.occurredAt || new Date().toISOString()),
+          },
+        });
+
+        // ACK message ONLY after successful processing and commit
+        await this.sqsClient.send(new DeleteMessageCommand({
+          QueueUrl: this.queueUrl,
+          ReceiptHandle: message.ReceiptHandle,
+        }));
+
+        this.logger.log({
+          msg: 'Message processed and ACKed',
+          messageId: message.MessageId,
+        });
       });
-
-      // ACK message ONLY after successful processing and commit
-      await this.sqsClient.send(new DeleteMessageCommand({
-        QueueUrl: this.queueUrl,
-        ReceiptHandle: message.ReceiptHandle,
-      }));
-
-      this.logger.log({
-        msg: 'Message processed and ACKed',
-        messageId: message.MessageId,
-      });
-
     } catch (error: any) {
       if (error.message.includes('InboxMessage collision: message already processed')) {
         // Already processed via Inbox pattern — safe to ACK
