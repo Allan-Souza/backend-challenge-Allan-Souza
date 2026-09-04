@@ -40,7 +40,7 @@ import { SqsConsumer } from './presentation/messaging/sqs.consumer.js';
         transport: process.env.NODE_ENV !== 'production' ? { target: 'pino-pretty' } : undefined,
         autoLogging: false,
         serializers: {
-          req: (req) => ({
+          req: (req: any) => ({
             id: req.id,
             method: req.method,
             url: req.url,
