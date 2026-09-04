@@ -10,7 +10,7 @@ import { AppModule } from '../src/app.module.js';
 describe('Transaction Controller (e2e)', () => {
   let app: INestApplication;
   let pgContainer: StartedPostgreSqlContainer;
-  let lsContainer: StartedLocalstackContainer;
+  let lsContainer: StartedLocalStackContainer;
   let orm: MikroORM;
 
   beforeAll(async () => {

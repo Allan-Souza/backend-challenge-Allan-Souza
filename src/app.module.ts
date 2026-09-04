@@ -24,7 +24,7 @@ import { PendingReferenceWorker } from './application/workers/pending-reference.
 // Presentation
 import { WalletController } from './presentation/http/wallet.controller.js';
 import { TransactionController } from './presentation/http/transaction.controller.js';
-import { ReconciliationController } from './presentation/http/reconciliation.controller.js';
+import { ProviderTransactionController } from './presentation/http/provider-transaction.controller.js';
 import { HealthController } from './presentation/http/health.controller.js';
 import { MessagingModule } from './infrastructure/messaging/messaging.module.js';
 import { SqsConsumer } from './presentation/messaging/sqs.consumer.js';
@@ -50,7 +50,7 @@ import { SqsConsumer } from './presentation/messaging/sqs.consumer.js';
       },
     }),
   ],
-  controllers: [AppController, WalletController, TransactionController, ReconciliationController, HealthController],
+  controllers: [AppController, WalletController, TransactionController, ProviderTransactionController, HealthController],
   providers: [
     AppService,
     WalletRepository,

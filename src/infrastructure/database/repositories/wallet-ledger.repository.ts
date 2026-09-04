@@ -11,4 +11,16 @@ export class WalletLedgerRepository {
     const entity = WalletLedgerEntity.fromDomain(entry);
     this.em.persist(entity);
   }
+
+  async findByWalletId(walletId: string, cursor?: string, limit: number = 50): Promise<WalletLedgerEntry[]> {
+    const where: any = { walletId };
+    if (cursor) {
+      where.id = { $gt: cursor };
+    }
+    const entities = await this.em.find(WalletLedgerEntity, where, {
+      orderBy: { createdAt: 'ASC', id: 'ASC' },
+      limit,
+    });
+    return entities.map(e => e.toDomain());
+  }
 }

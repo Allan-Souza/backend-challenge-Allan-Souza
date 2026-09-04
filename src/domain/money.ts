@@ -18,6 +18,11 @@ export class Money {
     if (!props.amount || props.amount.trim() === '') {
       throw new Error('Amount cannot be empty');
     }
+
+    // Reject scientific notation (e.g. "1e5", "2.5E-3")
+    if (/[eE]/.test(props.amount)) {
+      throw new Error('Amount must not use scientific notation');
+    }
     
     const decimalValue = new Decimal(props.amount);
     

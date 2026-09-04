@@ -9,12 +9,18 @@ import { Money } from '../../domain/money.js';
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus, FailureCode, LedgerDirection } from '../../domain/wager-transaction.js';
 import { WalletLedgerEntry } from '../../domain/wallet-ledger-entry.js';
 import { OutboxMessage, InboxMessage } from '../../domain/messaging.js';
+import {
+  WagerTransactionProcessed,
+  WagerTransactionRejected,
+  WalletBalanceChanged,
+  WagerTransactionPendingReference,
+} from '../../domain/integration-events.js';
 import { v7 as uuidv7 } from 'uuid';
 
 export interface SubmitWagerTransactionCommand {
   providerId: string;
   externalTransactionId: string;
-  payloadHash: string; // Used for exact idempotency checks later
+  payloadHash: string;
   playerId: string;
   currency: string;
   roundId: string;
@@ -90,7 +96,6 @@ export class SubmitWagerTransactionUseCase {
       const money = Money.from({ amount: command.moneyAmount, currency: command.currency });
 
       // 4. Create Transaction
-      // Note: we can't create it with arbitrary status directly if we use `create()`, we should create and then transition.
       const transaction = WagerTransaction.create({
         id: txId,
         providerId: command.providerId,
@@ -114,14 +119,15 @@ export class SubmitWagerTransactionUseCase {
       }
 
       // 5. Apply to Wallet if Processed
-      if (transaction.status === WagerTransactionStatus.Pending) { // Pending is the default from create()
+      let ledgerEntry: WalletLedgerEntry | undefined;
+      if (transaction.status === WagerTransactionStatus.Pending) {
         try {
           const balanceBefore = wallet.balance;
 
-          wallet.applyTransaction(transaction); // Wallet will apply logic based on kind
+          wallet.applyTransaction(transaction);
 
-          const direction = transaction.ledgerDirectionFor(undefined as any); // Assuming for Bet/Win/Refund it doesn't strictly need the ref instance
-          const ledgerEntry = WalletLedgerEntry.create({
+          const direction = transaction.ledgerDirectionFor(undefined as any);
+          ledgerEntry = WalletLedgerEntry.create({
             id: uuidv7(),
             walletId: wallet.id,
             transactionId: transaction.id,
@@ -145,22 +151,86 @@ export class SubmitWagerTransactionUseCase {
 
       // 6. Save Entities
       await this.transactionRepo.save(transaction);
-      await this.walletRepo.save(wallet); // Optimistic lock happens here upon commit
+      await this.walletRepo.save(wallet);
 
-      // 7. Emit Integration Event via Outbox
-      const outboxEvent = OutboxMessage.create({
-        id: uuidv7(),
-        aggregateId: transaction.id,
-        eventType: 'WagerTransactionCreated',
-        payload: {
-          transactionId: transaction.id,
-          walletId: wallet.id,
-          status: transaction.status,
-          kind: transaction.kind,
-          money: transaction.money.toJSON(),
+      // 7. Emit typed Integration Events via Outbox
+      const correlationId = uuidv7();
+      const now = new Date();
+
+      if (transaction.status === WagerTransactionStatus.Processed) {
+        // WagerTransactionProcessed
+        const processedEvent = WagerTransactionProcessed.from({
+          eventId: uuidv7(),
+          aggregateId: transaction.id,
+          correlationId,
+          occurredAt: now,
+          data: {
+            transactionId: transaction.id,
+            walletId: wallet.id,
+            playerId: transaction.playerId,
+            providerId: transaction.providerId,
+            kind: transaction.kind,
+            money: transaction.money.toJSON(),
+            roundId: transaction.roundId,
+            gameId: transaction.gameId,
+          },
+        });
+        await this.messagingRepo.saveOutboxMessage(OutboxMessage.enqueue(processedEvent));
+
+        // WalletBalanceChanged (only if balance actually changed, i.e. ledger entry exists)
+        if (ledgerEntry) {
+          const balanceEvent = WalletBalanceChanged.from({
+            eventId: uuidv7(),
+            aggregateId: wallet.id,
+            correlationId,
+            causationId: transaction.id,
+            occurredAt: now,
+            data: {
+              walletId: wallet.id,
+              transactionId: transaction.id,
+              direction: ledgerEntry.direction,
+              money: ledgerEntry.money.toJSON(),
+              balanceBefore: ledgerEntry.balanceBefore.toJSON(),
+              balanceAfter: ledgerEntry.balanceAfter.toJSON(),
+              walletVersion: wallet.version,
+            },
+          });
+          await this.messagingRepo.saveOutboxMessage(OutboxMessage.enqueue(balanceEvent));
         }
-      });
-      await this.messagingRepo.saveOutboxMessage(outboxEvent);
+      } else if (transaction.status === WagerTransactionStatus.Rejected || transaction.status === WagerTransactionStatus.Failed) {
+        const rejectedEvent = WagerTransactionRejected.from({
+          eventId: uuidv7(),
+          aggregateId: transaction.id,
+          correlationId,
+          occurredAt: now,
+          data: {
+            transactionId: transaction.id,
+            walletId: wallet.id,
+            playerId: transaction.playerId,
+            providerId: transaction.providerId,
+            kind: transaction.kind,
+            money: transaction.money.toJSON(),
+            failureCode: transaction.failureCode || 'UNKNOWN',
+          },
+        });
+        await this.messagingRepo.saveOutboxMessage(OutboxMessage.enqueue(rejectedEvent));
+      } else if (transaction.status === WagerTransactionStatus.PendingReference) {
+        const pendingEvent = WagerTransactionPendingReference.from({
+          eventId: uuidv7(),
+          aggregateId: transaction.id,
+          correlationId,
+          occurredAt: now,
+          data: {
+            transactionId: transaction.id,
+            walletId: wallet.id,
+            playerId: transaction.playerId,
+            providerId: transaction.providerId,
+            kind: transaction.kind,
+            referenceExternalTransactionId: transaction.referenceExternalTransactionId || '',
+          },
+        });
+        await this.messagingRepo.saveOutboxMessage(OutboxMessage.enqueue(pendingEvent));
+      }
 
       if (command.inbox) {
         const inboxMsg = InboxMessage.receive({

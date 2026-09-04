@@ -1,5 +1,5 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
-import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } from '@aws-sdk/client-sqs';
+import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand, ChangeMessageVisibilityCommand } from '@aws-sdk/client-sqs';
 import { SubmitWagerTransactionUseCase } from '../../application/use-cases/submit-wager-transaction.usecase.js';
 import { WagerTransactionKind } from '../../domain/wager-transaction.js';
 
@@ -7,7 +7,9 @@ import { WagerTransactionKind } from '../../domain/wager-transaction.js';
 export class InboxWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(InboxWorkerService.name);
   private isRunning = false;
-  private readonly queueUrl = 'http://localhost:4566/000000000000/wager-transactions.fifo';
+  private activeMessages = 0;
+  private shutdownResolve?: () => void;
+  private readonly queueUrl = process.env.SQS_WAGER_QUEUE_URL || 'http://localhost:4566/000000000000/wager-transactions.fifo';
   private readonly consumerName = 'inbox-worker-1';
 
   constructor(
@@ -21,9 +23,20 @@ export class InboxWorkerService implements OnModuleInit, OnModuleDestroy {
     this.poll();
   }
 
-  onModuleDestroy() {
-    this.logger.log('Stopping SQS Inbox Worker...');
+  async onModuleDestroy() {
+    this.logger.log('Stopping SQS Inbox Worker (graceful shutdown)...');
     this.isRunning = false;
+
+    // Wait for in-flight messages to complete (max 30s)
+    if (this.activeMessages > 0) {
+      this.logger.log(`Waiting for ${this.activeMessages} in-flight message(s) to complete...`);
+      await Promise.race([
+        new Promise<void>((resolve) => { this.shutdownResolve = resolve; }),
+        new Promise<void>((resolve) => setTimeout(resolve, 30000)),
+      ]);
+    }
+
+    this.logger.log('SQS Inbox Worker stopped.');
   }
 
   private async poll() {
@@ -38,11 +51,14 @@ export class InboxWorkerService implements OnModuleInit, OnModuleDestroy {
         const response = await this.sqsClient.send(command);
 
         if (response.Messages && response.Messages.length > 0) {
-          await Promise.all(response.Messages.map((msg) => this.processMessage(msg)));
+          for (const msg of response.Messages) {
+            await this.processMessage(msg);
+          }
         }
       } catch (error) {
+        if (!this.isRunning) break; // Don't log errors during shutdown
         this.logger.error('Error receiving messages from SQS', error);
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Sleep before retry
+        await new Promise((resolve) => setTimeout(resolve, 5000));
       }
     }
   }
@@ -50,16 +66,26 @@ export class InboxWorkerService implements OnModuleInit, OnModuleDestroy {
   private async processMessage(message: any) {
     if (!message.Body || !message.ReceiptHandle) return;
 
+    this.activeMessages++;
     try {
       const payload = JSON.parse(message.Body);
+      const receiveCount = parseInt(message.Attributes?.ApproximateReceiveCount || '1', 10);
       
-      this.logger.log(`Processing message ${message.MessageId} from SQS`);
+      this.logger.log({
+        msg: 'Processing SQS message',
+        messageId: message.MessageId,
+        receiveCount,
+        type: payload.type,
+      });
 
-      // Using the exact format specified in README
+      // Distinguish error types per README section 10:
+      // - Business errors (terminal) → ack
+      // - Transient errors → retry with backoff (don't ack)
+      // - Permanent errors → DLQ (don't ack, let maxReceiveCount handle it)
       await this.submitTransactionUseCase.execute({
         providerId: payload.data.providerId,
         externalTransactionId: payload.data.externalTransactionId,
-        payloadHash: payload.data.idempotencyKey, // Mock hash logic using key
+        payloadHash: payload.data.idempotencyKey,
         playerId: payload.data.playerId,
         currency: payload.data.money.currency,
         roundId: payload.data.roundId,
@@ -70,29 +96,81 @@ export class InboxWorkerService implements OnModuleInit, OnModuleDestroy {
         inbox: {
           messageId: message.MessageId,
           consumerName: this.consumerName,
-          payloadHash: payload.data.idempotencyKey, // Simplification
+          payloadHash: payload.data.idempotencyKey,
           receivedAt: new Date(payload.occurredAt || new Date().toISOString()),
         },
       });
 
-      // Ack message ONLY after successful processing and commit
+      // ACK message ONLY after successful processing and commit
       await this.sqsClient.send(new DeleteMessageCommand({
         QueueUrl: this.queueUrl,
         ReceiptHandle: message.ReceiptHandle,
       }));
-      this.logger.log(`Successfully processed and ACKed message ${message.MessageId}`);
+
+      this.logger.log({
+        msg: 'Message processed and ACKed',
+        messageId: message.MessageId,
+      });
 
     } catch (error: any) {
       if (error.message.includes('InboxMessage collision: message already processed')) {
-        this.logger.warn(`Message ${message.MessageId} was already processed (Inbox pattern). ACKing...`);
+        // Already processed via Inbox pattern — safe to ACK
+        this.logger.warn({
+          msg: 'Duplicate message detected (Inbox pattern), ACKing',
+          messageId: message.MessageId,
+        });
         await this.sqsClient.send(new DeleteMessageCommand({
           QueueUrl: this.queueUrl,
           ReceiptHandle: message.ReceiptHandle,
         }));
+      } else if (error.message.includes('Idempotency collision')) {
+        // Business error: idempotency conflict — terminal, ACK to prevent retries
+        this.logger.warn({
+          msg: 'Idempotency collision (terminal business error), ACKing',
+          messageId: message.MessageId,
+          error: error.message,
+        });
+        await this.sqsClient.send(new DeleteMessageCommand({
+          QueueUrl: this.queueUrl,
+          ReceiptHandle: message.ReceiptHandle,
+        }));
+      } else if (this.isTransientError(error)) {
+        // Transient error — increase visibility timeout for backoff, don't ACK
+        this.logger.warn({
+          msg: 'Transient error, scheduling retry with backoff',
+          messageId: message.MessageId,
+          error: error.message,
+        });
+        try {
+          await this.sqsClient.send(new ChangeMessageVisibilityCommand({
+            QueueUrl: this.queueUrl,
+            ReceiptHandle: message.ReceiptHandle,
+            VisibilityTimeout: 30, // 30s backoff
+          }));
+        } catch (_) {
+          // Ignore visibility change errors
+        }
       } else {
-        this.logger.error(`Failed to process message ${message.MessageId}: ${error.message}`);
-        // Do not ACK. Will be picked up again or moved to DLQ based on maxReceiveCount in SQS config
+        // Permanent/unknown error — don't ACK, let DLQ handle via maxReceiveCount
+        this.logger.error({
+          msg: 'Permanent error processing message, will be retried or sent to DLQ',
+          messageId: message.MessageId,
+          error: error.message,
+        });
+      }
+    } finally {
+      this.activeMessages--;
+      if (this.activeMessages === 0 && this.shutdownResolve) {
+        this.shutdownResolve();
       }
     }
+  }
+
+  private isTransientError(error: any): boolean {
+    const msg = error.message?.toLowerCase() || '';
+    return msg.includes('optimisticlockerror') ||
+           msg.includes('connection') ||
+           msg.includes('timeout') ||
+           msg.includes('econnrefused');
   }
 }

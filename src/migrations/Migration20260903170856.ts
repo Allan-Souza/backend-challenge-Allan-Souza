@@ -16,11 +16,14 @@ export class Migration20260903170856 extends Migration {
     this.addSql(`alter table "wager_transactions" add constraint "wager_transactions_idempotency_key_unique" unique ("idempotency_key");`);
 
     this.addSql(`create table "wallets" ("id" varchar(255) not null, "player_id" varchar(255) not null, "currency" varchar(255) not null, "balance" numeric(18,2) not null, "version" int not null default 1, "created_at" timestamptz not null, "updated_at" timestamptz not null, primary key ("id"));`);
+    this.addSql(`alter table "wallets" add constraint "wallets_player_id_currency_unique" unique ("player_id", "currency");`);
+    this.addSql(`alter table "wallets" add constraint "wallets_balance_non_negative" check ("balance" >= 0);`);
 
     this.addSql(`create table "wallet_ledger" ("id" varchar(255) not null, "wallet_id" varchar(255) not null, "transaction_id" varchar(255) not null, "direction" text not null, "money_amount" numeric(18,2) not null, "money_currency" varchar(255) not null, "balance_before_amount" numeric(18,2) not null, "balance_before_currency" varchar(255) not null, "balance_after_amount" numeric(18,2) not null, "balance_after_currency" varchar(255) not null, "created_at" timestamptz not null, primary key ("id"));`);
     this.addSql(`alter table "wallet_ledger" add constraint "wallet_ledger_transaction_id_unique" unique ("transaction_id");`);
     this.addSql(`create index "wallet_ledger_wallet_id_created_at_index" on "wallet_ledger" ("wallet_id", "created_at");`);
 
+    this.addSql(`alter table "wager_transactions" add constraint "wager_transactions_provider_external_unique" unique ("provider_id", "external_transaction_id");`);
     this.addSql(`alter table "wager_transactions" add constraint "wager_transactions_kind_check" check ("kind" in ('OPENING', 'BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'));`);
     this.addSql(`alter table "wager_transactions" add constraint "wager_transactions_status_check" check ("status" in ('PENDING', 'PENDING_REFERENCE', 'PROCESSED', 'REJECTED', 'FAILED'));`);
     this.addSql(`alter table "wager_transactions" add constraint "wager_transactions_failure_code_check" check ("failure_code" in ('INSUFFICIENT_FUNDS', 'NEGATIVE_BALANCE', 'DUPLICATE_REFERENCE', 'REFERENCE_NOT_FOUND', 'INVALID_STATE', 'INVALID_CURRENCY', 'PROVIDER_MISMATCH', 'UNEXPECTED_ERROR'));`);
